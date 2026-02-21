@@ -1,0 +1,39 @@
+# Data files - DO NOT upload to GitHub
+*.csv
+*.xlsx
+*.xls
+output/data/
+output/reports/
+output/figures/
+
+# Raw data folder
+raw data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environment
+venv/
+env/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter
+.ipynb_checkpoints/
