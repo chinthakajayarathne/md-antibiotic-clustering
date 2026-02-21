@@ -30,6 +30,14 @@ def load_data(path):
     print("=" * 60)
 
     df = pd.read_csv(path, low_memory=False)
+
+    # Normalize column names for pseudonymised data
+    rename_map = {
+        "patient_pseudo_id": "patient_id",
+        "prescriber_pseudo_id": "prescriber_id",
+    }
+    df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
+
     print(f"\nLoaded: {df.shape[0]} encounters, {df.shape[1]} columns")
     print(f"Columns: {list(df.columns)}")
     print(f"\nFirst 3 rows:")

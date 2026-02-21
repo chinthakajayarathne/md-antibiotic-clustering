@@ -17,7 +17,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 import gower
-from sklearn_extra.cluster import KMedoids
+import kmedoids
 from config import (
     ENCOUNTER_PRESCRIBER_PATH, ENCOUNTER_CLUSTERED_PATH,
     FIGURES_DIR, K_RANGE, AGE_STRATA
@@ -76,15 +76,12 @@ def compute_gower_and_cluster(feature_matrix, k_range):
     print(f"  Gower distance matrix: {gower_dist.shape}")
 
     results = {}
-    print("\n--- Running k-medoids for k = {min(k_range)}..{max(k_range)} ---")
+    print(f"\n--- Running k-medoids for k = {min(k_range)}..{max(k_range)} ---")
     for k in k_range:
-        kmed = KMedoids(
-            n_clusters=k, metric="precomputed",
-            init="k-medoids++", random_state=42, max_iter=300
-        )
-        labels = kmed.fit_predict(gower_dist)
+        km_result = kmedoids.fasterpam(gower_dist, k, random_state=42, max_iter=300)
+        labels = km_result.labels
         sil = silhouette_score(gower_dist, labels, metric="precomputed")
-        results[k] = {"labels": labels, "silhouette": sil, "model": kmed}
+        results[k] = {"labels": labels, "silhouette": sil, "km_result": km_result}
         print(f"  k={k}: silhouette = {sil:.4f}")
 
     return gower_dist, results

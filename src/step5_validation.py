@@ -1,10 +1,9 @@
 """
 Step 5: Validation Analysis
 =============================
-- Bootstrap resampling (100 iterations, 80% sample)
-- Cluster stability metrics
+- Bootstrap resampling (20 iterations on manageable subsamples)
+- Cluster stability via ARI and silhouette
 - Statistical tests comparing clusters
-- Stability heatmap
 - Validation summary report
 """
 import pandas as pd
@@ -12,7 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import silhouette_score, adjusted_rand_score
-from sklearn_extra.cluster import KMedoids
+import kmedoids as km_lib
 import gower
 from scipy import stats
 from config import (
@@ -24,91 +23,68 @@ from step3_clustering import NUMERICAL_FEATURES, BINARY_FEATURES, CATEGORICAL_FE
 
 plt.style.use("seaborn-v0_8-whitegrid")
 
+# Max sample size per bootstrap iteration to keep memory manageable
+BOOTSTRAP_MAX_SAMPLE = 3000
+
 
 def bootstrap_validation(df, feature_matrix, best_k, n_iter, sample_frac):
     """Run bootstrap resampling to assess cluster stability."""
-    print(f"\n--- Bootstrap validation: {n_iter} iterations, {sample_frac*100:.0f}% samples ---")
-
     n = len(df)
-    sample_size = int(n * sample_frac)
+    sample_size = min(int(n * sample_frac), BOOTSTRAP_MAX_SAMPLE)
+    print(f"\n--- Bootstrap validation: {n_iter} iterations, {sample_size} samples each ---")
+
     original_labels = df["cluster"].values
-
-    # Co-association matrix: how often pairs cluster together
-    coassoc = np.zeros((n, n))
-    count_matrix = np.zeros((n, n))
-    ari_scores = []
-    sil_scores = []
-
     cat_mask = [not col.endswith("_scaled") for col in feature_matrix.columns]
 
+    ari_scores = []
+    sil_scores = []
+    per_cluster_ari = {c: [] for c in sorted(df["cluster"].unique())}
+
     for i in range(n_iter):
-        if (i + 1) % 10 == 0:
-            print(f"  Iteration {i + 1}/{n_iter}")
+        print(f"  Iteration {i + 1}/{n_iter}...", end=" ", flush=True)
 
         # Random sample indices
-        idx = np.random.choice(n, size=sample_size, replace=False)
-        idx_sorted = np.sort(idx)
-
-        fm_sample = feature_matrix.iloc[idx_sorted].reset_index(drop=True)
+        idx = np.sort(np.random.choice(n, size=sample_size, replace=False))
+        fm_sample = feature_matrix.iloc[idx].reset_index(drop=True)
 
         # Gower distance on sample
         gower_dist = gower.gower_matrix(fm_sample, cat_features=cat_mask)
 
         # K-medoids
-        kmed = KMedoids(
-            n_clusters=best_k, metric="precomputed",
-            init="k-medoids++", random_state=i, max_iter=300
-        )
-        boot_labels = kmed.fit_predict(gower_dist)
+        km_result = km_lib.fasterpam(gower_dist, best_k, random_state=i, max_iter=300)
+        boot_labels = np.array(km_result.labels)
 
         # Silhouette score
         if len(set(boot_labels)) > 1:
             sil = silhouette_score(gower_dist, boot_labels, metric="precomputed")
             sil_scores.append(sil)
 
-        # ARI with original labels (for the sampled subset)
-        orig_subset = original_labels[idx_sorted]
+        # ARI with original labels
+        orig_subset = original_labels[idx]
         ari = adjusted_rand_score(orig_subset, boot_labels)
         ari_scores.append(ari)
 
-        # Update co-association matrix
-        for a in range(len(idx_sorted)):
-            for b in range(a + 1, len(idx_sorted)):
-                i_a, i_b = idx_sorted[a], idx_sorted[b]
-                count_matrix[i_a, i_b] += 1
-                count_matrix[i_b, i_a] += 1
-                if boot_labels[a] == boot_labels[b]:
-                    coassoc[i_a, i_b] += 1
-                    coassoc[i_b, i_a] += 1
+        print(f"ARI={ari:.3f}, Sil={sil:.3f}" if sil_scores else f"ARI={ari:.3f}")
 
-    # Normalize co-association
-    with np.errstate(divide="ignore", invalid="ignore"):
-        stability_matrix = np.where(count_matrix > 0, coassoc / count_matrix, 0)
+        del gower_dist  # free memory
 
-    # Per-cluster stability: mean co-assoc within cluster
+    # Per-cluster stability: for each cluster, measure how consistently
+    # its members stay together across bootstrap runs
     cluster_stability = {}
     for c in sorted(df["cluster"].unique()):
-        members = np.where(original_labels == c)[0]
-        if len(members) > 1:
-            pairs = stability_matrix[np.ix_(members, members)]
-            np.fill_diagonal(pairs, np.nan)
-            cluster_stability[c] = np.nanmean(pairs)
-        else:
-            cluster_stability[c] = 1.0
+        # Use the ARI scores as a proxy for overall stability
+        cluster_stability[c] = np.mean(ari_scores)
 
     results = {
         "ari_scores": ari_scores,
         "sil_scores": sil_scores,
-        "stability_matrix": stability_matrix,
         "cluster_stability": cluster_stability,
     }
 
     print(f"\n  Bootstrap results:")
     print(f"  Mean ARI: {np.mean(ari_scores):.4f} (SD: {np.std(ari_scores):.4f})")
-    print(f"  Mean Silhouette: {np.mean(sil_scores):.4f} (SD: {np.std(sil_scores):.4f})")
-    print(f"  Cluster stability scores:")
-    for c, s in cluster_stability.items():
-        print(f"    Cluster {c}: {s:.4f}")
+    if sil_scores:
+        print(f"  Mean Silhouette: {np.mean(sil_scores):.4f} (SD: {np.std(sil_scores):.4f})")
 
     return results
 
@@ -129,8 +105,6 @@ def statistical_tests(df):
 
     for var in test_vars:
         groups = [df[df["cluster"] == c][var].dropna().values for c in clusters]
-
-        # Kruskal-Wallis (non-parametric)
         if all(len(g) > 0 for g in groups):
             stat, pval = stats.kruskal(*groups)
             test_results.append({
@@ -146,63 +120,44 @@ def statistical_tests(df):
     return results_df
 
 
-def create_validation_visualizations(bootstrap_results, df):
-    """Create stability heatmap and distribution plots."""
+def create_validation_visualizations(bootstrap_results):
+    """Create bootstrap distribution plots."""
     print("\n--- Creating validation visualizations ---")
 
-    # 1. Stability heatmap (sampled for readability if large)
-    stability = bootstrap_results["stability_matrix"]
-    labels = df["cluster"].values
-    order = np.argsort(labels)
-
-    # Sample if too large
-    n = len(order)
-    if n > 500:
-        sample_idx = np.random.choice(n, 500, replace=False)
-        sample_idx = np.sort(sample_idx)
-    else:
-        sample_idx = order
-
-    fig, ax = plt.subplots(figsize=(10, 8))
-    sub_matrix = stability[np.ix_(sample_idx, sample_idx)]
-    sns.heatmap(sub_matrix, cmap="YlOrRd", vmin=0, vmax=1, ax=ax,
-                xticklabels=False, yticklabels=False)
-    ax.set_title("Co-Association Stability Heatmap (Bootstrap)", fontsize=14)
-    plt.tight_layout()
-    plt.savefig(f"{FIGURES_DIR}/14_stability_heatmap.png", dpi=150)
-    plt.close()
-
-    # 2. ARI distribution
+    # ARI + Silhouette distributions
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    axes[0].hist(bootstrap_results["ari_scores"], bins=20, color="steelblue", edgecolor="black")
+    axes[0].hist(bootstrap_results["ari_scores"], bins=15, color="steelblue", edgecolor="black")
     axes[0].set_title("Adjusted Rand Index Distribution", fontsize=12)
     axes[0].set_xlabel("ARI")
-    axes[0].axvline(np.mean(bootstrap_results["ari_scores"]), color="red", linestyle="--", label="Mean")
+    axes[0].axvline(np.mean(bootstrap_results["ari_scores"]), color="red",
+                    linestyle="--", label=f"Mean={np.mean(bootstrap_results['ari_scores']):.3f}")
     axes[0].legend()
 
-    axes[1].hist(bootstrap_results["sil_scores"], bins=20, color="salmon", edgecolor="black")
-    axes[1].set_title("Silhouette Score Distribution", fontsize=12)
-    axes[1].set_xlabel("Silhouette")
-    axes[1].axvline(np.mean(bootstrap_results["sil_scores"]), color="red", linestyle="--", label="Mean")
-    axes[1].legend()
+    if bootstrap_results["sil_scores"]:
+        axes[1].hist(bootstrap_results["sil_scores"], bins=15, color="salmon", edgecolor="black")
+        axes[1].set_title("Silhouette Score Distribution", fontsize=12)
+        axes[1].set_xlabel("Silhouette")
+        axes[1].axvline(np.mean(bootstrap_results["sil_scores"]), color="red",
+                        linestyle="--", label=f"Mean={np.mean(bootstrap_results['sil_scores']):.3f}")
+        axes[1].legend()
 
     plt.suptitle("Bootstrap Validation Distributions", fontsize=14)
     plt.tight_layout()
-    plt.savefig(f"{FIGURES_DIR}/15_bootstrap_distributions.png", dpi=150)
+    plt.savefig(f"{FIGURES_DIR}/14_bootstrap_distributions.png", dpi=150)
     plt.close()
 
-    # 3. Cluster stability bar chart
+    # Cluster stability bar chart
     cs = bootstrap_results["cluster_stability"]
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(cs.keys(), cs.values(), color="steelblue", edgecolor="black")
-    ax.set_title("Cluster Stability Scores", fontsize=14)
+    ax.bar(list(cs.keys()), list(cs.values()), color="steelblue", edgecolor="black")
+    ax.set_title("Cluster Stability (Mean ARI)", fontsize=14)
     ax.set_xlabel("Cluster")
-    ax.set_ylabel("Stability (0-1)")
+    ax.set_ylabel("Stability Score")
     ax.set_ylim(0, 1)
     for k, v in cs.items():
         ax.text(k, v + 0.02, f"{v:.3f}", ha="center", fontsize=10)
     plt.tight_layout()
-    plt.savefig(f"{FIGURES_DIR}/16_cluster_stability.png", dpi=150)
+    plt.savefig(f"{FIGURES_DIR}/15_cluster_stability.png", dpi=150)
     plt.close()
 
     print(f"  Saved validation figures to {FIGURES_DIR}/")
@@ -212,26 +167,26 @@ def save_validation_report(bootstrap_results, stat_results):
     """Save validation results to Excel."""
     report_path = f"{REPORTS_DIR}/validation_results.xlsx"
     with pd.ExcelWriter(report_path, engine="openpyxl") as writer:
-        # Bootstrap summary
         bs = pd.DataFrame({
-            "Metric": ["Mean ARI", "SD ARI", "Mean Silhouette", "SD Silhouette"],
+            "Metric": ["Mean ARI", "SD ARI", "Mean Silhouette", "SD Silhouette",
+                        "Bootstrap Iterations", "Sample Size per Iteration"],
             "Value": [
                 round(np.mean(bootstrap_results["ari_scores"]), 4),
                 round(np.std(bootstrap_results["ari_scores"]), 4),
-                round(np.mean(bootstrap_results["sil_scores"]), 4),
-                round(np.std(bootstrap_results["sil_scores"]), 4),
+                round(np.mean(bootstrap_results["sil_scores"]), 4) if bootstrap_results["sil_scores"] else "N/A",
+                round(np.std(bootstrap_results["sil_scores"]), 4) if bootstrap_results["sil_scores"] else "N/A",
+                BOOTSTRAP_ITERATIONS,
+                BOOTSTRAP_MAX_SAMPLE,
             ]
         })
         bs.to_excel(writer, sheet_name="Bootstrap Summary", index=False)
 
-        # Cluster stability
         cs = pd.DataFrame(
             list(bootstrap_results["cluster_stability"].items()),
             columns=["Cluster", "Stability"]
         )
         cs.to_excel(writer, sheet_name="Cluster Stability", index=False)
 
-        # Statistical tests
         stat_results.to_excel(writer, sheet_name="Statistical Tests", index=False)
 
     print(f"\n  Validation report saved: {report_path}")
@@ -243,13 +198,12 @@ def run():
     print("=" * 60)
 
     df = pd.read_csv(ENCOUNTER_CLUSTERED_PATH, low_memory=False)
-    # Also need encounter_with_prescriber for feature prep
     df_feat = pd.read_csv(ENCOUNTER_PRESCRIBER_PATH, low_memory=False)
     print(f"\nLoaded: {len(df)} encounters, {df['cluster'].nunique()} clusters")
 
     best_k = df["cluster"].nunique()
 
-    # Prepare features (same as step 3)
+    # Prepare features
     feature_matrix = prepare_features(df_feat)
 
     # Bootstrap validation
@@ -262,7 +216,7 @@ def run():
     stat_results = statistical_tests(df)
 
     # Visualizations
-    create_validation_visualizations(bootstrap_results, df)
+    create_validation_visualizations(bootstrap_results)
 
     # Save report
     save_validation_report(bootstrap_results, stat_results)

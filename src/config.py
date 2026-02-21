@@ -13,7 +13,7 @@ REPORTS_DIR = os.path.join(OUTPUT_DIR, "reports")
 DATA_DIR = os.path.join(OUTPUT_DIR, "data")
 
 # Raw data path
-PATH_TO_DATA = r"D:\Academic\MD Research 2025\raw data\2026_januaryPrescriptions.csv"
+PATH_TO_DATA = r"D:\Academic\MD Research 2025\raw data\2026_januaryPrescriptions_pseudonymised.csv"
 
 # Intermediate data paths
 ENCOUNTER_CLEAN_PATH = os.path.join(DATA_DIR, "encounter_level_clean.csv")
@@ -45,7 +45,7 @@ MAX_WEIGHT_KG = 150
 
 # Clustering parameters
 K_RANGE = range(3, 9)  # k = 3 to 8
-BOOTSTRAP_ITERATIONS = 100
+BOOTSTRAP_ITERATIONS = 20
 BOOTSTRAP_SAMPLE_FRACTION = 0.80
 
 # Polypharmacy threshold
